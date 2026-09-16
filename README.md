@@ -20,6 +20,36 @@ Run `npm run build`, then `npm start`. The Node server serves both the built fro
 
 The schema is also initialized on server startup. Setup creates the table if missing and never drops existing records. Previous hosted records are not automatically copied into this Supabase database.
 
+## Hosting frontend and backend on one URL (Vercel)
+
+This repository includes a Vite frontend and a Vercel Node function in `api/index.js`.
+`vercel.json` routes `/api/*` to the existing Express API. The frontend uses relative
+`/api` URLs, so published share links and API calls use the same domain.
+
+Production: https://secret-drop-app.vercel.app
+
+The former https://secret-drop-app.surge.sh address redirects to production,
+preserving message code query parameters. Its redirect page is in
+`deployment/surge-redirect/index.html`.
+
+1. Sign in to Vercel and use the free Hobby plan for a personal project.
+2. Add the values from your local `.env` as server environment variables:
+   `PGUSER`, `PGPASSWORD`, `PGDATABASE`, `PGHOST`, `PGPORT`, `PGSSL`,
+   and `PGSSLROOTCERT`. Never prefix database credentials with `VITE_`.
+   Keep `PGSSLROOTCERT=server/certs/supabase-ca.crt`; the public CA is bundled
+   with the function. Keep `PGSSL=true`.
+3. Run `npm run db:setup` once before the first deployment. The serverless
+   handler does not perform schema changes on requests.
+4. Deploy with `npx vercel --prod`. No separate backend URL is needed.
+   Leave `VITE_API_BASE_URL` unset for this deployment.
+5. Verify `/api/health` and run `npm run test:smoke` with
+   `SECRET_DROP_TEST_URL` set to the resulting HTTPS origin. The smoke test
+   creates and removes its own random encrypted test record.
+
+Deploying only `dist` to Surge still cannot run the Node API. Deploy the whole
+project to Vercel for a working single-domain application. `.env` files are
+excluded from the uploaded source; configure secrets in Vercel's environment.
+
 ## Checks
 
 Run `npm run typecheck`, `npm run lint`, and `npm run build`.

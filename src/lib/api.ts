@@ -16,7 +16,11 @@ export class ApiError extends Error {
 }
 
 export async function apiRequest(path: string, options?: RequestInit) {
-  const response = await fetch(`/api${path}`, options);
+  const apiBase = (import.meta.env.VITE_API_BASE_URL || '/api').replace(/\/+$/, '');
+  const response = await fetch(`${apiBase}${path}`, options);
+  if (!response.headers.get('content-type')?.includes('application/json') && response.status !== 204) {
+    throw new ApiError('The message service is unavailable. Please try again later.', response.status);
+  }
   if (!response.ok) {
     const body = await response.json().catch(() => ({}));
     throw new ApiError(body.error || 'Request failed.', response.status);

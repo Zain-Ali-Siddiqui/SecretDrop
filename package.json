@@ -3,6 +3,7 @@
   "private": true,
   "version": "0.0.0",
   "type": "module",
+  "engines": { "node": "22.x" },
   "scripts": {
     "dev": "concurrently -k \"npm:dev:server\" \"npm:dev:client\"",
     "dev:client": "vite",
@@ -10,6 +11,7 @@
     "db:setup": "node --env-file=.env server/setup.js",
     "start": "node --env-file-if-exists=.env server/index.js",
     "build": "vite build",
+    "test:smoke": "node --env-file-if-exists=.env scripts/smoke-test.mjs",
     "lint": "eslint .",
     "preview": "vite preview",
     "typecheck": "tsc --noEmit -p tsconfig.app.json"
