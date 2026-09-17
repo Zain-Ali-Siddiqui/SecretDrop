@@ -7,6 +7,8 @@ export interface SecretMessage {
   created_at: string;
   expires_at: string;
   expired: boolean;
+  burn_after_read: boolean;
+  view_count: number;
 }
 
 export class ApiError extends Error {

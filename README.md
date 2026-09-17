@@ -1,6 +1,12 @@
 # SecretDrop
 
-Encrypted message sharing using React, a Node.js API, and Supabase PostgreSQL. Encryption and decryption run in the browser; the API stores ciphertext only. Messages expire after seven days and can be destroyed using their share code.
+Encrypted message sharing using React, a Node.js API, and Supabase PostgreSQL. Encryption and decryption run in the browser; the API stores ciphertext only. Senders choose a 10-minute, 1-hour, 1-day, or 7-day lifetime and can enable Burn After Read.
+
+Manual deletion requires the sender's private management link. Its random token is separate from the recipient share link, stored only as a hash in the database, and never returned by read endpoints. Save the private link; without accounts there is no sender-key recovery. Pre-update messages remain readable until expiry but have no sender deletion key, so public deletion of those messages is disabled.
+
+Burn messages contain a random read-confirmation token inside their encrypted payload. After successful local decryption, the app atomically deletes the database record using that token, then reveals the text and shows the Self-destructed badge. Incorrect passwords cannot confirm a burn. Only one concurrent confirmation succeeds. This cannot prevent a modified client from saving ciphertext or withholding confirmation, or a recipient from retaining revealed text.
+
+The view counter records unlock requests, including incorrect-password attempts; it is not a count of distinct people or proof of successful reads. Expiry is enforced server-side on every unlock/burn request; expired rows are inaccessible but are not physically purged by a scheduled task. Burn and sender deletion physically remove the record from the live table.
 
 ## Local setup
 

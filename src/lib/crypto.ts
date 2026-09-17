@@ -1,6 +1,14 @@
 const PBKDF2_ITERATIONS = 250000;
 const KEY_LENGTH = 256;
 
+export async function encryptSecret(message: string, password: string, burn: boolean) {
+  if (!burn) return { ...await encryptMessage(message, password), burn_token_hash: null };
+  const token = Array.from(crypto.getRandomValues(new Uint8Array(32)), (b) => b.toString(16).padStart(2, '0')).join('');
+  const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(token));
+  const burn_token_hash = Array.from(new Uint8Array(digest), (b) => b.toString(16).padStart(2, '0')).join('');
+  return { ...await encryptMessage(JSON.stringify({ message, burnToken: token }), password), burn_token_hash };
+}
+
 function bufferToBase64(buffer: ArrayBuffer): string {
   const bytes = new Uint8Array(buffer);
   let binary = '';

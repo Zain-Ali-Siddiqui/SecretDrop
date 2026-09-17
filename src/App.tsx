@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
 import {
   Lock,
   Send,
@@ -16,9 +16,11 @@ import {
   Clock,
 } from 'lucide-react';
 import { apiRequest, ApiError, type SecretMessage } from '@/lib/api';
-import { encryptMessage, decryptMessage, generateCode } from '@/lib/crypto';
+import { encryptSecret, decryptMessage, generateCode } from '@/lib/crypto';
+import { passwordStrength } from '@/lib/password';
 
-type View = 'create' | 'created' | 'unlock' | 'revealed';
+type View = 'create' | 'created' | 'unlock' | 'revealed' | 'manage';
+const expiryOptions = [{ seconds: 600, label: '10 minutes' }, { seconds: 3600, label: '1 hour' }, { seconds: 86400, label: '1 day' }, { seconds: 604800, label: '7 days' }];
 
 export default function App() {
   const [view, setView] = useState<View>('create');
@@ -34,9 +36,26 @@ export default function App() {
   const [revealedMessage, setRevealedMessage] = useState('');
   const [copied, setCopied] = useState(false);
   const [storedMessage, setStoredMessage] = useState<SecretMessage | null>(null);
+  const [burnAfterRead, setBurnAfterRead] = useState(false);
+  const [expirySeconds, setExpirySeconds] = useState(604800);
+  const [deleteToken, setDeleteToken] = useState('');
+  const [deleted, setDeleted] = useState(false);
+  const [selfDestructed, setSelfDestructed] = useState(false);
+  const [privateCopied, setPrivateCopied] = useState(false);
+  const submitting = useRef(false);
+  const strength = passwordStrength(password);
+  const expiryLabel = expiryOptions.find((option) => option.seconds === expirySeconds)?.label;
+  const privateLink = `${window.location.origin}${window.location.pathname}#manage=${createdCode}.${deleteToken}`;
 
   // Check URL for a code on mount (e.g. ?code=ABCD1234)
   useEffect(() => {
+    const owner = /^#manage=([A-Z2-9]{8})\.([a-f0-9]{64})$/.exec(window.location.hash);
+    if (owner) {
+      setCreatedCode(owner[1]);
+      setDeleteToken(owner[2]);
+      setView('manage');
+      return;
+    }
     const params = new URLSearchParams(window.location.search);
     const code = params.get('code');
     if (code) {
@@ -46,57 +65,81 @@ export default function App() {
   }, []);
 
   const handleCreate = useCallback(async () => {
+    if (submitting.current) return;
     if (!message.trim() || !password.trim()) {
       setError('Please enter both a message and a password.');
       return;
     }
+    submitting.current = true;
     setLoading(true);
     setError('');
     try {
       const code = generateCode();
-      const { ciphertext, iv, salt } = await encryptMessage(message, password);
+      const encrypted = await encryptSecret(message, password, burnAfterRead);
 
-      await apiRequest('/secrets', {
+      const result = await apiRequest('/secrets', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ code, ciphertext, iv, salt }),
+        body: JSON.stringify({ code, ...encrypted, burn_after_read: burnAfterRead, expiry_seconds: expirySeconds }),
       });
 
       setCreatedCode(code);
+      setDeleteToken(result.delete_token);
+      setDeleted(false);
+      setMessage('');
+      setPassword('');
+      window.history.replaceState({}, '', `#manage=${code}.${result.delete_token}`);
       setView('created');
     } catch (err) {
       setError(err instanceof ApiError ? err.message : 'Something went wrong. Please try again.');
     } finally {
+      submitting.current = false;
       setLoading(false);
     }
-  }, [message, password]);
+  }, [message, password, burnAfterRead, expirySeconds]);
 
   const handleUnlock = useCallback(async () => {
+    if (submitting.current) return;
     if (!unlockCode.trim() || !unlockPassword.trim()) {
       setError('Please enter both the code and the password.');
       return;
     }
+    submitting.current = true;
     setLoading(true);
     setError('');
     try {
-      const msg: SecretMessage = await apiRequest('/secrets/' + encodeURIComponent(unlockCode.trim().toUpperCase()));
+      const msg: SecretMessage = await apiRequest('/secrets/' + encodeURIComponent(unlockCode.trim().toUpperCase()) + '/unlock', { method: 'POST' });
 
+      let decrypted: string;
       try {
-        const decrypted = await decryptMessage(
+        decrypted = await decryptMessage(
           msg.ciphertext,
           msg.iv,
           msg.salt,
           unlockPassword
         );
-        setRevealedMessage(decrypted);
-        setStoredMessage(msg);
-        setView('revealed');
       } catch {
         setError('Wrong password. The message could not be decrypted.');
+        return;
       }
+      setSelfDestructed(false);
+      if (msg.burn_after_read) {
+        const envelope = JSON.parse(decrypted);
+        const result = await apiRequest(`/secrets/${msg.code}/burn`, {
+          method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ token: envelope.burnToken }),
+        });
+        decrypted = envelope.message;
+        msg.view_count = result.view_count;
+        setSelfDestructed(result.self_destructed);
+      }
+      setRevealedMessage(decrypted);
+      setStoredMessage(msg);
+      setUnlockPassword('');
+      setView('revealed');
     } catch (err) {
       setError(err instanceof ApiError ? err.message : 'Something went wrong. Please try again.');
     } finally {
+      submitting.current = false;
       setLoading(false);
     }
   }, [unlockCode, unlockPassword]);
@@ -110,35 +153,48 @@ export default function App() {
     setStoredMessage(null);
     setError('');
     setCreatedCode('');
+    setDeleteToken('');
+    setDeleted(false);
+    setSelfDestructed(false);
+    setBurnAfterRead(false);
+    setExpirySeconds(604800);
+    setCopied(false);
+    setPrivateCopied(false);
     setView('create');
     const url = new URL(window.location.href);
     url.searchParams.delete('code');
+    url.hash = '';
     window.history.replaceState({}, '', url);
   }, []);
 
   const handleDelete = useCallback(async () => {
-    if (!storedMessage) return;
+    if (!createdCode || !deleteToken) return;
     setLoading(true);
     setError('');
     try {
-      await apiRequest('/secrets/' + encodeURIComponent(storedMessage.code), { method: 'DELETE' });
-      resetAll();
+      await apiRequest('/secrets/' + encodeURIComponent(createdCode), { method: 'DELETE', headers: { Authorization: `Bearer ${deleteToken}` } });
+      setDeleted(true);
+      setError('');
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Could not delete the message.');
     } finally {
       setLoading(false);
     }
-  }, [storedMessage, resetAll]);
+  }, [createdCode, deleteToken]);
 
-  const copyCode = useCallback(() => {
+  const copyCode = useCallback(async () => {
     const shareUrl = `${window.location.origin}${window.location.pathname}?code=${createdCode}`;
-    navigator.clipboard.writeText(shareUrl);
-    setCopied(true);
-    setTimeout(() => setCopied(false), 2000);
+    try {
+      await navigator.clipboard.writeText(shareUrl);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+    } catch {
+      setError('Could not copy. Select and copy the recipient link above.');
+    }
   }, [createdCode]);
 
   // ── Created view ──
-  if (view === 'created') {
+  if (view === 'created' || view === 'manage') {
     return (
       <div className="min-h-screen bg-gradient-to-br from-slate-950 via-slate-900 to-slate-950 flex items-center justify-center p-4 sm:p-6">
         <div className="w-full max-w-lg">
@@ -149,12 +205,17 @@ export default function App() {
               </div>
             </div>
             <h2 className="text-2xl font-bold text-white text-center mb-2">
-              Your secret is ready
+              {deleted ? 'Secret deleted' : view === 'manage' ? 'Manage your secret' : 'Your secret is ready'}
             </h2>
             <p className="text-slate-400 text-center text-sm mb-8">
-              Share this link and the password separately for maximum security.
+              {deleted ? 'The message has been permanently removed from the database.' : 'Keep your private delete link. Share only the recipient link below.'}
             </p>
 
+            {!deleted && <>
+            {view === 'created' && <div className="flex flex-wrap gap-2 mb-5 text-xs">
+              <span className="rounded-full bg-sky-500/10 text-sky-300 px-3 py-1.5">Expires in {expiryLabel}</span>
+              {burnAfterRead && <span className="rounded-full bg-orange-500/10 text-orange-300 px-3 py-1.5">Burn after read</span>}
+            </div>}
             <div className="bg-slate-800/50 rounded-2xl p-5 mb-5 border border-slate-700/50">
               <p className="text-xs font-medium text-slate-500 uppercase tracking-wider mb-2">
                 Shareable Link
@@ -190,10 +251,19 @@ export default function App() {
               <div className="flex items-start gap-3">
                 <AlertCircle className="w-5 h-5 text-slate-500 shrink-0 mt-0.5" />
                 <p className="text-sm text-slate-400 leading-relaxed">
-                  Send the link and the password through different channels — for example, email the link and text the password. The message expires in 7 days.
+                  Send the recipient link and password through different channels. Only your private delete link allows manual deletion.
                 </p>
               </div>
             </div>
+            <div className="rounded-2xl border border-red-500/20 p-4 mb-5 bg-red-500/5">
+              <p className="text-sm text-red-200 font-medium mb-2">Private delete link — sender only</p>
+              <p className="text-xs text-slate-400 mb-3">Save this link to delete later, even on another device. Do not send it to the recipient.</p>
+              <input aria-label="Private delete link" readOnly value={privateLink} className="w-full bg-slate-800 text-slate-300 text-xs p-3 rounded-xl mb-3" onFocus={(e) => e.target.select()} />
+              <button onClick={async () => { try { await navigator.clipboard.writeText(privateLink); setPrivateCopied(true); } catch { setError('Could not copy. Select and copy the private link above.'); } }} className="text-sm text-sky-300 mr-4">{privateCopied ? 'Copied' : 'Copy private link'}</button>
+              <button onClick={handleDelete} disabled={loading} className="text-sm text-red-300 disabled:opacity-50"><Trash2 className="w-4 h-4 inline mr-1" />{loading ? 'Deleting…' : 'Delete my secret'}</button>
+            </div>
+            </>}
+            {error && <p role="alert" className="text-sm text-red-300 mb-4">{error}</p>}
 
             <button
               onClick={resetAll}
@@ -233,19 +303,13 @@ export default function App() {
 
             <div className="flex items-center justify-center gap-2 mb-6 text-xs text-slate-500">
               <Clock className="w-3.5 h-3.5" />
-              <span>Expires {storedMessage?.expires_at ? new Date(storedMessage.expires_at).toLocaleDateString() : 'in 7 days'}</span>
+              <span>{selfDestructed ? 'Self-destructed — deleted from database' : `Expires ${storedMessage?.expires_at ? new Date(storedMessage.expires_at).toLocaleString() : ''}`}</span>
             </div>
+            <p className="text-center text-sm text-sky-300 mb-5">{storedMessage?.view_count} unlock attempt{storedMessage?.view_count === 1 ? '' : 's'} (including incorrect passwords)</p>
+            {selfDestructed && <p role="status" className="rounded-full bg-orange-500/10 border border-orange-500/20 text-orange-300 text-center text-sm p-2 mb-5">Self-destructed</p>}
 
             {error && <p role="alert" className="text-sm text-red-300 mb-4">{error}</p>}
             <div className="flex gap-3">
-              <button
-                onClick={handleDelete}
-                disabled={loading}
-                className="flex-1 flex items-center justify-center gap-2 py-3.5 rounded-2xl bg-red-500/10 hover:bg-red-500/20 text-red-400 font-medium transition-all border border-red-500/20"
-              >
-                <Trash2 className="w-4 h-4" />
-                Destroy
-              </button>
               <button
                 onClick={resetAll}
                 className="flex-1 py-3.5 rounded-2xl bg-slate-800 hover:bg-slate-700 text-slate-200 font-medium transition-all border border-slate-700/50"
@@ -410,8 +474,21 @@ export default function App() {
                   {showPassword ? <EyeOff className="w-5 h-5" /> : <Eye className="w-5 h-5" />}
                 </button>
               </div>
+              <div className="mt-3" role="meter" aria-label="Password strength" aria-valuemin={0} aria-valuemax={5} aria-valuenow={strength.score} aria-valuetext={strength.label}>
+                <div className="flex gap-1.5" aria-hidden="true">{[1, 2, 3, 4, 5].map((bar) => <span key={bar} className={`h-1.5 flex-1 rounded-full transition-colors ${bar <= strength.score ? strength.color : 'bg-slate-700'}`} />)}</div>
+                <p className="text-xs text-slate-300 mt-2">{strength.label}</p>
+              </div>
+              <p className="text-xs text-slate-500 mt-1">Use a long, unique password. Strength is an estimate.</p>
             </div>
 
+            <fieldset>
+              <legend className="text-xs font-medium text-slate-400 uppercase tracking-wider mb-2">Message expiry</legend>
+              <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">{expiryOptions.map((option) => <label key={option.seconds} className={`cursor-pointer rounded-xl border p-2.5 text-center text-sm ${expirySeconds === option.seconds ? 'border-sky-500 bg-sky-500/10 text-sky-300' : 'border-slate-700 text-slate-400'}`}><input className="sr-only" type="radio" name="expiry" checked={expirySeconds === option.seconds} onChange={() => setExpirySeconds(option.seconds)} />{option.label}</label>)}</div>
+            </fieldset>
+            <label className="flex items-center justify-between gap-4 rounded-2xl border border-slate-700 bg-slate-800/30 p-4 cursor-pointer">
+              <span><span className="block text-sm text-slate-200 font-medium">Burn After Read</span><span className="block text-xs text-slate-400 mt-1">Delete permanently after the first successful unlock.</span></span>
+              <input type="checkbox" role="switch" aria-label="Burn After Read" checked={burnAfterRead} onChange={(e) => setBurnAfterRead(e.target.checked)} className="w-5 h-5 accent-orange-400 shrink-0" />
+            </label>
             <button
               onClick={handleCreate}
               disabled={loading}
@@ -430,6 +507,10 @@ export default function App() {
         </div>
 
         {/* Footer */}
+        <nav aria-label="About SecretDrop" className="mt-6 flex justify-center gap-5 text-sm text-sky-300">
+          <a href="/guide.html" className="hover:underline">How it works</a>
+          <a href="/privacy.html" className="hover:underline">Privacy</a>
+        </nav>
         <div className="mt-6 flex items-center justify-center gap-2 text-xs text-slate-600">
           <Lock className="w-3.5 h-3.5" />
           <span>Messages are encrypted in your browser — the server never sees your text or password.</span>
